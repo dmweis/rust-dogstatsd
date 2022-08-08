@@ -4,6 +4,8 @@ use std::fmt;
 use std::io::Error;
 use std::net::AddrParseError;
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
+use std::os::unix::net::UnixDatagram;
+use std::path::{Path, PathBuf};
 use std::time;
 
 extern crate rand;
@@ -37,6 +39,29 @@ impl fmt::Display for StatsdError {
 
 impl error::Error for StatsdError {}
 
+enum AbstractSocket {
+    UdpSocket {
+        socket: UdpSocket,
+        host: SocketAddr,
+    },
+    UdsSocket {
+        socket: UnixDatagram,
+        socket_address: PathBuf,
+    },
+}
+
+impl AbstractSocket {
+    fn send(&self, data: &[u8]) -> Result<usize, std::io::Error> {
+        match self {
+            AbstractSocket::UdpSocket { socket, host } => socket.send_to(data, host),
+            AbstractSocket::UdsSocket {
+                socket,
+                socket_address,
+            } => socket.send_to(data, socket_address),
+        }
+    }
+}
+
 /// Client socket for statsd servers.
 ///
 /// After creating a metric you can use `Client`
@@ -53,15 +78,14 @@ impl error::Error for StatsdError {}
 /// client.incr("some.metric.completed");
 /// ```
 pub struct Client {
-    socket: UdpSocket,
-    server_address: SocketAddr,
+    socket: AbstractSocket,
     prefix: String,
     constant_tags: Vec<String>,
 }
 
 impl Client {
-    /// Construct a new statsd client given an host/port & prefix
-    pub fn new<T: ToSocketAddrs>(
+    /// Construct a new statsd client using a UDP socket using a host/port & prefix
+    pub fn with_udp_socket<T: ToSocketAddrs>(
         host: T,
         prefix: &str,
         constant_tags: Option<Vec<&str>>,
@@ -78,10 +102,38 @@ impl Client {
         } else {
             UdpSocket::bind("[::]:0")?
         };
-        Ok(Client {
+
+        let abstract_socket = AbstractSocket::UdpSocket {
             socket,
+            host: server_address,
+        };
+        Ok(Client {
+            socket: abstract_socket,
             prefix: prefix.to_string(),
-            server_address,
+
+            constant_tags: match constant_tags {
+                Some(tags) => tags.iter().map(|x| x.to_string()).collect(),
+                None => vec![],
+            },
+        })
+    }
+
+    /// Construct a new statsd client using a Unix Domain socket using a path
+    pub fn with_uds_socket(
+        socket_address: &Path,
+        prefix: &str,
+        constant_tags: Option<Vec<&str>>,
+    ) -> Result<Client, StatsdError> {
+        let socket = UnixDatagram::unbound()?;
+
+        let abstract_socket = AbstractSocket::UdsSocket {
+            socket,
+            socket_address: socket_address.to_owned(),
+        };
+        Ok(Client {
+            socket: abstract_socket,
+            prefix: prefix.to_string(),
+
             constant_tags: match constant_tags {
                 Some(tags) => tags.iter().map(|x| x.to_string()).collect(),
                 None => vec![],
@@ -227,7 +279,7 @@ impl Client {
 
     /// Send data along the UDP socket.
     fn send(&self, data: String) {
-        let _ = self.socket.send_to(data.as_bytes(), self.server_address);
+        let _ = self.socket.send(data.as_bytes());
     }
 
     /// Get a pipeline struct that allows optimizes the number of UDP
@@ -504,7 +556,9 @@ impl Pipeline {
 #[cfg(test)]
 mod test {
     extern crate rand;
+    extern crate tempdir;
     use self::rand::distributions::{IndependentSample, Range};
+    use self::tempdir::TempDir;
     use super::*;
     use std::net::UdpSocket;
     use std::str;
@@ -549,7 +603,7 @@ mod test {
     fn test_sending_gauge() {
         let host = next_test_ip4();
         let server = make_server(&host);
-        let client = Client::new(&host, "myapp", None).unwrap();
+        let client = Client::with_udp_socket(&host, "myapp", None).unwrap();
 
         client.gauge("metric", 9.1, &None);
 
@@ -558,10 +612,26 @@ mod test {
     }
 
     #[test]
+    fn test_sending_gauge_uds() {
+        let tmp_dir = TempDir::new("test_socket").unwrap();
+        let socket_path = tmp_dir.path().join("test.sock");
+        let server = std::os::unix::net::UnixDatagram::bind(&socket_path).unwrap();
+
+        let client = Client::with_uds_socket(&socket_path, "myapp", None).unwrap();
+
+        client.gauge("metric", 9.1, &None);
+
+        let mut buf = [0; 128];
+        let (len, _) = server.recv_from(&mut buf).unwrap();
+        let response = str::from_utf8(&buf[0..len]).unwrap().to_string();
+        assert_eq!("myapp.metric:9.1|g", response);
+    }
+
+    #[test]
     fn test_sending_gauge_without_prefix() {
         let host = next_test_ip4();
         let server = make_server(&host);
-        let client = Client::new(&host, "", None).unwrap();
+        let client = Client::with_udp_socket(&host, "", None).unwrap();
 
         client.gauge("metric", 9.1, &None);
 
@@ -573,7 +643,7 @@ mod test {
     fn test_sending_incr() {
         let host = next_test_ip4();
         let server = make_server(&host);
-        let client = Client::new(&host, "myapp", None).unwrap();
+        let client = Client::with_udp_socket(&host, "myapp", None).unwrap();
 
         client.incr("metric", &None);
 
@@ -585,7 +655,7 @@ mod test {
     fn test_sending_decr() {
         let host = next_test_ip4();
         let server = make_server(&host);
-        let client = Client::new(&host, "myapp", None).unwrap();
+        let client = Client::with_udp_socket(&host, "myapp", None).unwrap();
 
         client.decr("metric", &None);
 
@@ -597,7 +667,7 @@ mod test {
     fn test_sending_count() {
         let host = next_test_ip4();
         let server = make_server(&host);
-        let client = Client::new(&host, "myapp", None).unwrap();
+        let client = Client::with_udp_socket(&host, "myapp", None).unwrap();
 
         client.count("metric", 12.2, &None);
 
@@ -609,7 +679,7 @@ mod test {
     fn test_sending_timer() {
         let host = next_test_ip4();
         let server = make_server(&host);
-        let client = Client::new(&host, "myapp", None).unwrap();
+        let client = Client::with_udp_socket(&host, "myapp", None).unwrap();
 
         client.timer("metric", 21.39, &None);
 
@@ -621,7 +691,7 @@ mod test {
     fn test_sending_timed_block() {
         let host = next_test_ip4();
         let server = make_server(&host);
-        let client = Client::new(&host, "myapp", None).unwrap();
+        let client = Client::with_udp_socket(&host, "myapp", None).unwrap();
         struct TimeTest {
             num: u8,
         };
@@ -643,7 +713,7 @@ mod test {
     fn test_sending_histogram() {
         let host = next_test_ip4();
         let server = make_server(&host);
-        let client = Client::new(&host, "myapp", None).unwrap();
+        let client = Client::with_udp_socket(&host, "myapp", None).unwrap();
 
         // without tags
         client.histogram("metric", 9.1, &None);
@@ -660,7 +730,8 @@ mod test {
         let host = next_test_ip4();
         let server = make_server(&host);
         let client =
-            Client::new(&host, "myapp", Some(vec!["tag1common", "tag2common:test"])).unwrap();
+            Client::with_udp_socket(&host, "myapp", Some(vec!["tag1common", "tag2common:test"]))
+                .unwrap();
 
         // without tags
         client.histogram("metric", 9.1, &None);
@@ -687,7 +758,7 @@ mod test {
     fn test_sending_event_with_tags() {
         let host = next_test_ip4();
         let server = make_server(&host);
-        let client = Client::new(&host, "myapp", None).unwrap();
+        let client = Client::with_udp_socket(&host, "myapp", None).unwrap();
 
         client.event(
             "Title Test",
@@ -707,7 +778,7 @@ mod test {
     fn test_sending_service_check_with_tags() {
         let host = next_test_ip4();
         let server = make_server(&host);
-        let client = Client::new(&host, "myapp", None).unwrap();
+        let client = Client::with_udp_socket(&host, "myapp", None).unwrap();
 
         client.service_check(
             "Service.check.name",
@@ -723,7 +794,7 @@ mod test {
     fn test_pipeline_sending_time_block() {
         let host = next_test_ip4();
         let server = make_server(&host);
-        let client = Client::new(&host, "myapp", None).unwrap();
+        let client = Client::with_udp_socket(&host, "myapp", None).unwrap();
         let mut pipeline = client.pipeline();
         pipeline.gauge("metric", 9.1);
         struct TimeTest {
@@ -745,7 +816,7 @@ mod test {
     fn test_pipeline_sending_gauge() {
         let host = next_test_ip4();
         let server = make_server(&host);
-        let client = Client::new(&host, "myapp", None).unwrap();
+        let client = Client::with_udp_socket(&host, "myapp", None).unwrap();
         let mut pipeline = client.pipeline();
         pipeline.gauge("metric", 9.1);
         pipeline.send(&client);
@@ -758,7 +829,7 @@ mod test {
     fn test_pipeline_sending_histogram() {
         let host = next_test_ip4();
         let server = make_server(&host);
-        let client = Client::new(&host, "myapp", None).unwrap();
+        let client = Client::with_udp_socket(&host, "myapp", None).unwrap();
         let mut pipeline = client.pipeline();
         pipeline.histogram("metric", 9.1);
         pipeline.send(&client);
@@ -771,7 +842,7 @@ mod test {
     fn test_pipeline_sending_multiple_data() {
         let host = next_test_ip4();
         let server = make_server(&host);
-        let client = Client::new(&host, "myapp", None).unwrap();
+        let client = Client::with_udp_socket(&host, "myapp", None).unwrap();
         let mut pipeline = client.pipeline();
         pipeline.gauge("metric", 9.1);
         pipeline.count("metric", 12.2);
@@ -785,7 +856,7 @@ mod test {
     fn test_pipeline_set_max_udp_size() {
         let host = next_test_ip4();
         let server = make_server(&host);
-        let client = Client::new(&host, "myapp", None).unwrap();
+        let client = Client::with_udp_socket(&host, "myapp", None).unwrap();
         let mut pipeline = client.pipeline();
         pipeline.set_max_udp_size(20);
         pipeline.gauge("metric", 9.1);
@@ -800,7 +871,7 @@ mod test {
     fn test_pipeline_send_metric_after_pipeline() {
         let host = next_test_ip4();
         let server = make_server(&host);
-        let client = Client::new(&host, "myapp", None).unwrap();
+        let client = Client::with_udp_socket(&host, "myapp", None).unwrap();
         let mut pipeline = client.pipeline();
 
         pipeline.gauge("load", 9.0);
