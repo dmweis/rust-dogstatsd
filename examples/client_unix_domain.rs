@@ -1,12 +1,14 @@
 // Load the crate
 extern crate datadog_statsd;
 
+use std::path::PathBuf;
+
 // Import the client object.
 use datadog_statsd::client::{AlertType, Client, ServiceCheckStatus};
 
 fn main() {
-    let client = Client::with_udp_socket(
-        "127.0.0.1:8125",
+    let client = Client::with_uds_socket(
+        &PathBuf::from(r"YOUR_SOCKET"),
         "myapp",
         Some(vec!["common1", "common2:test"]),
     )
