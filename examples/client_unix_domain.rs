@@ -1,6 +1,3 @@
-// Load the crate
-extern crate datadog_statsd;
-
 use std::path::PathBuf;
 
 // Import the client object.

@@ -1,6 +1,3 @@
-// Load the crate
-extern crate datadog_statsd;
-
 // Import the client object.
 use datadog_statsd::client::{AlertType, Client, ServiceCheckStatus};
 

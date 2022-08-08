@@ -1,6 +1,7 @@
 [package]
 name = "datadog-statsd"
 version = "0.2.0"
+edition = '2021'
 description = "A dogstatsd client for rust."
 homepage = "https://github.com/minato128/rust-dogstatsd"
 repository = "https://github.com/minato128/rust-dogstatsd"

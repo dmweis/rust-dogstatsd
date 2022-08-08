@@ -8,8 +8,6 @@ use std::os::unix::net::UnixDatagram;
 use std::path::{Path, PathBuf};
 use std::time;
 
-extern crate rand;
-
 #[derive(Debug)]
 pub enum StatsdError {
     IoError(Error),
@@ -555,15 +553,13 @@ impl Pipeline {
 
 #[cfg(test)]
 mod test {
-    extern crate rand;
-    extern crate tempdir;
-    use self::rand::distributions::{IndependentSample, Range};
-    use self::tempdir::TempDir;
     use super::*;
+    use rand::distributions::{IndependentSample, Range};
     use std::net::UdpSocket;
     use std::str;
     use std::sync::mpsc::sync_channel;
     use std::thread;
+    use tempdir::TempDir;
 
     static PORT: u16 = 8125;
 

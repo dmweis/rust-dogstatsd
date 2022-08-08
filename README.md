@@ -26,8 +26,6 @@ You need rustc >= 1.8.0 for statsd to work.
 You can then get a client instance and start tracking metrics:
 
 ```rust
-// Load the crate
-extern crate datadog_statsd;
 
 // Import the client object.
 use datadog_statsd::Client;
